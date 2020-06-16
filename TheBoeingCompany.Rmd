@@ -1,0 +1,170 @@
+---
+title: "The Boeing Company"
+author: "Ekaterina Iushutina"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("quantmod", lib.loc="~/R/R-3.6.3/library")
+library("forecast", lib.loc="~/R/R-3.6.3/library")
+library("nortest", lib.loc="~/R/R-3.6.3/library")
+library("tseries", lib.loc="~/R/R-3.6.3/library")
+library("FitAR", lib.loc="~/R/R-3.6.3/library")
+library("lmtest", lib.loc="~/R/R-3.6.3/library")
+library("tidyr", lib.loc="~/R/R-3.6.3/library")
+library("randtests", lib.loc="~/R/R-3.6.3/library")
+library("knitr", lib.loc="~/R/R-3.6.3/library")
+options("getSymbols.warning4.0" = FALSE)
+opts_template$set(figure1 = list(fig.height = 4.5, fig.width = 7))
+```
+
+Let's bring in data of The Boeing Company from Yahoo Finance. We are going to forecast the close prices.
+```{r, results='hide'}
+getSymbols('BA', from = '2016-01-01', to = '2020-06-03')
+close_prices = BA[,4]
+```
+
+Before building a model we have to fill the missing values.
+
+```{r}
+df = data.frame(date = as.Date.character(index(close_prices)))
+df$close = as.numeric(close_prices$BA.Close)
+df = df %>% complete(date = as.Date(date[1]:date[nrow(df)]))
+close_prices = zoo(df$close, df$date)
+close_clean = tsclean(close_prices, replace.missing = T)
+close_clean = ts(close_clean, start = c(2016,1), frequency = 365)
+```
+
+Let's have a look on graphs of the time series.
+
+```{r echo=FALSE}
+plot(close_clean, type = "l", main = "Close prices")
+#par(mfrow = c(1,2))
+#acf(close_clean, lag.max = 30, main = "ACF")
+#pacf(close_clean, lag.max = 30, main = "PACF")
+```
+
+There is heteroscedasticity of the data, we can use a transformations that stabilize the variance. Let's take the logarithm of the data and plot the graphs of the time series, autocorrelation and partial autocorrelation.
+
+```{r echo=FALSE, opts.label = "figure1"}
+log_close_clean = log(close_clean)
+plot(log_close_clean, type = "l", main = "log(Close_prices)")
+par(mfrow = c(1,2))
+acf(log_close_clean, lag.max = 30, main = "ACF")
+pacf(log_close_clean, lag.max = 30, main = "PACF")
+```
+
+This is definitely non-stationary time series. PACF has just one nonzero lag that is first lag. ACF is going down slowly. So the time series may have drift or unit root. Let's find out if there is a trend. For this we will perform Cox Stuart test.
+
+```{r}
+cox.stuart.test(log_close_clean)
+```
+
+P-value is very small, thus there is significant trend. Let's perform Augmented Dickey-Fuller Test and Phillips-Perron Test to find out if the time series have a unit root.
+
+```{r}
+adf.test(log_close_clean, alternative = "stationary")$p.value
+pp.test(log_close_clean)$p.value
+```
+P-values of both tests are close to 1, thus the time series have a unit root and we have to differentiate.
+
+```{r echo=FALSE}
+tsdisplay(diff(log_close_clean), lag.max = 30, main = "Differentiated log(close_prices)")
+```
+
+Let's use Ljung-Box test to find out if there is a correlation or autocorrelation among different lags of the differentiated time series.
+
+```{r}
+Box.test(diff(log_close_clean), lag = log(length(close_clean)), type = "Ljung-Box")
+```
+
+P-value is small, there may be autocorrelations and we can find them using ACF and PACF. On the ACF we have the closer spikes at lag 2, so this suggests MA(q) model where q may be equal 0,1 or 2. On the PACF we have a significant closer lag 2. So order p of AP(p) is 0, 1 or 2. Let's perform several models with various combinations q and p.
+
+```{r}
+d = 1
+for(p in 1:3){
+  for(q in 1:3){
+    if(p+d+q <= 8){
+       model <- arima(x = log_close_clean, order = c((p-1),d,(q-1)))
+       pval <- Box.test(model$residuals, lag=log(length(model$residuals)), 
+                        type = "Ljung-Box")
+       sse <- sum(model$residuals^2)
+       cat(p-1,d,q-1, 'AIC=', model$aic, ' SSE=',sse,' p-value=', pval$p.value,'\n')
+    }
+  }
+}
+```
+
+Thus we have obtained AICs, SSEs and p-values of residuals' Ljung-Box test. The models (1,1,2), (2,1,1) and (2,1,2) have the smallest AIC, p-values of these models are large enough to accept that residuals don't have correlation or autocorrelation among different lags. Let's adapt models (0,1,0), (2,1,2), auto.arima model and auto Exponential smoothing model.
+
+```{r, results='hide'}
+mod1 = arima(log_close_clean, order = c(0,1,0))
+mod2 = arima(log_close_clean, order = c(2,1,2))
+mod_a = auto.arima(log_close_clean)
+mod_Exp = ets(log_close_clean)
+```
+
+Compare the AIC, variance of residuals and mean absolute percent error:
+
+```{r, echo=FALSE}
+cat('Model:  (5,2,0)    (0,1,0)   (2,1,2)    ETS \n')
+cat('AIC:    ', mod_a$aic, mod1$aic, mod2$aic, mod_Exp$aic, '\n')
+cat('Sigma2: ', mod_a$sigma2, mod1$sigma2, mod2$sigma2, mod_Exp$sigma2, '\n')
+cat('MAPE:   ', accuracy(mod_a)[5], accuracy(mod1)[5], accuracy(mod2)[5],
+    accuracy(mod_Exp)[5])
+```
+
+We can see that auto.arima (5,2,0) is less accurate model. ETS is the most accurate model. Let's have a look on graphs of the residuals.
+
+```{r, echo=FALSE, opts.label = "figure1"}
+tsdisplay(mod_a$residuals, lag.max = 30, main = "residuals of model (5,2,0)")
+tsdisplay(mod1$residuals, lag.max = 30, main = "residuals of model (0,1,0)")
+tsdisplay(mod2$residuals, lag.max = 30, main = "residuals of model (2,1,2)")
+tsdisplay(mod_Exp$residuals, lag.max = 30, main = "residuals of ETS model")
+```
+
+ACF and PACF of model (5,2,0) have several significant closer lags. The residuals of other three models look like almost white noise and there is no significant autocorrelation left in the residuals. Let's confirm this by performing the Ljung-Box test.
+
+```{r}
+Box.test(mod_a$residuals, lag = (5+2+1), type = "Ljung-Box", fitdf = (5+2))$p.value
+Box.test(mod1$residuals, lag = (1+1), type = "Ljung-Box", fitdf = 1)$p.value
+Box.test(mod2$residuals, lag = (2+2+1), type = "Ljung-Box", fitdf = (2+2))$p.value
+Box.test(mod_Exp$residuals, lag = log(length(close_clean)), type = "Ljung-Box")$p.value
+```
+
+Let's take a look on a distribution of residuals of (2,1,2) model. The histogramm of residuals and Normal Q-Q plot show both a left and a right tails and a systematic departure from normality although the distribution is quite symmetric.
+
+```{r echo=FALSE}
+par(mfrow = c(1,2))
+hist(mod2$residuals)
+qqnorm(mod2$residuals)
+qqline(mod2$residuals)
+```
+
+Let's forecast the close prices for the next week by all four models.
+
+```{r echo=FALSE, opts.label = "figure1"}
+f_a = forecast(mod_a, 7)
+f_1 = forecast(mod1, 7)
+f_2 = forecast(mod2, 7)
+f_e = forecast(mod_Exp, 7)
+plot(f_a, main = "forecast of (5,2,0)", include = 200)
+plot(f_1, main = "forecast of (0,1,0)", include = 200)
+plot(f_2, main = "forecast of (2,1,2)", include = 200)
+plot(f_e, main = "forecast of ETS model", include = 200)
+```
+
+The plots of (5,2,0) model is going up, (0,1,0) predicts constant value 5.032462, (2,1,2) and ETS forecasts are predicted to growth slowy. We can see that (2,1,2) and ETS models are the most accurate because the confidence intervals of the predicted values are narrower than others.
+
+```{r include=FALSE}
+max(f_a$upper[,1] - f_a$lower[,1])
+max(f_1$upper[,1] - f_1$lower[,1])
+max(f_2$upper[,1] - f_2$lower[,1])
+max(f_e$upper[,1] - f_e$lower[,1])
+
+min(f_a$upper[,1] - f_a$lower[,1])
+min(f_1$upper[,1] - f_1$lower[,1])
+min(f_2$upper[,1] - f_2$lower[,1])
+min(f_e$upper[,1] - f_e$lower[,1])
+```
